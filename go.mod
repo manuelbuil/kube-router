@@ -28,6 +28,7 @@ require (
 	k8s.io/client-go v0.21.3
 	k8s.io/cri-api v0.21.3
 	k8s.io/klog/v2 v2.10.0
+	k8s.io/utils v0.0.0-20201110183641-67b214c5f920 // indirect
 )
 
 replace github.com/containerd/containerd => github.com/containerd/containerd v1.5.4 // CVE-2021-32760
