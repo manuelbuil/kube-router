@@ -85,10 +85,23 @@ const (
 	tmpIPSetPrefix = "TMP-"
 )
 
+type IPSetHandler interface {
+	Create(setName string, createOptions ...string) (*Set, error)
+	Add(set *Set) error
+	RefreshSet(setName string, entriesWithOptions [][]string, setType string)
+	Destroy(setName string) error
+	DestroyAllWithin() error
+	Save() error
+	Restore() error
+	Flush() error
+	Get(setName string) *Set
+	Sets() map[string]*Set
+}
+
 // IPSet represent ipset sets managed by.
 type IPSet struct {
 	ipSetPath *string
-	Sets      map[string]*Set
+	sets      map[string]*Set
 	isIpv6    bool
 }
 
@@ -160,7 +173,7 @@ func NewIPSet(isIpv6 bool) (*IPSet, error) {
 	}
 	ipSet := &IPSet{
 		ipSetPath: ipSetPath,
-		Sets:      make(map[string]*Set),
+		sets:      make(map[string]*Set),
 		isIpv6:    isIpv6,
 	}
 	return ipSet, nil
@@ -172,7 +185,7 @@ func NewIPSet(isIpv6 bool) (*IPSet, error) {
 func (ipset *IPSet) Create(setName string, createOptions ...string) (*Set, error) {
 	// Populate Set map if needed
 	if ipset.Get(setName) == nil {
-		ipset.Sets[setName] = &Set{
+		ipset.sets[setName] = &Set{
 			Name:    setName,
 			Options: createOptions,
 			Parent:  ipset,
@@ -180,7 +193,7 @@ func (ipset *IPSet) Create(setName string, createOptions ...string) (*Set, error
 	}
 
 	// Determine if set with the same name is already active on the system
-	setIsActive, err := ipset.Sets[setName].IsActive()
+	setIsActive, err := ipset.sets[setName].IsActive()
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine if ipset set %s exists: %s",
 			setName, err)
@@ -190,7 +203,7 @@ func (ipset *IPSet) Create(setName string, createOptions ...string) (*Set, error
 	if !setIsActive {
 		if ipset.isIpv6 {
 			// Add "family inet6" option and a "inet6:" prefix for IPv6 sets.
-			args := []string{"create", "-exist", ipset.Sets[setName].name()}
+			args := []string{"create", "-exist", ipset.sets[setName].name()}
 			args = append(args, createOptions...)
 			args = append(args, "family", "inet6")
 			if _, err := ipset.run(args...); err != nil {
@@ -204,7 +217,7 @@ func (ipset *IPSet) Create(setName string, createOptions ...string) (*Set, error
 			}
 		}
 	}
-	return ipset.Sets[setName], nil
+	return ipset.sets[setName], nil
 }
 
 // Add a given Set to an IPSet
@@ -230,7 +243,7 @@ func (ipset *IPSet) Add(set *Set) error {
 // RefreshSet add/update internal Sets with a Set of entries but does not run restore command
 func (ipset *IPSet) RefreshSet(setName string, entriesWithOptions [][]string, setType string) {
 	if ipset.Get(setName) == nil {
-		ipset.Sets[setName] = &Set{
+		ipset.sets[setName] = &Set{
 			Name:    setName,
 			Options: []string{setType, OptionTimeout, "0"},
 			Parent:  ipset,
@@ -238,7 +251,7 @@ func (ipset *IPSet) RefreshSet(setName string, entriesWithOptions [][]string, se
 	}
 	entries := make([]*Entry, len(entriesWithOptions))
 	for i, entry := range entriesWithOptions {
-		entries[i] = &Entry{Set: ipset.Sets[setName], Options: entry}
+		entries[i] = &Entry{Set: ipset.sets[setName], Options: entry}
 	}
 	ipset.Get(setName).Entries = entries
 }
@@ -321,7 +334,7 @@ func (set *Set) Destroy() error {
 		return err
 	}
 
-	delete(set.Parent.Sets, set.Name)
+	delete(set.Parent.sets, set.Name)
 	return nil
 }
 
@@ -344,7 +357,7 @@ func (ipset *IPSet) Destroy(setName string) error {
 
 // DestroyAllWithin destroys all sets contained within the IPSet's Sets.
 func (ipset *IPSet) DestroyAllWithin() error {
-	for _, v := range ipset.Sets {
+	for _, v := range ipset.sets {
 		err := v.Destroy()
 		if err != nil {
 			return err
@@ -406,8 +419,8 @@ func parseIPSetSave(ipset *IPSet, result string) map[string]*Set {
 // create KUBE-DST-3YNVZWWGX3UQQ4VQ hash:ip family inet hashsize 1024 maxelem 65536 timeout 0
 // add KUBE-DST-3YNVZWWGX3UQQ4VQ 100.96.1.6 timeout 0
 func buildIPSetRestore(ipset *IPSet) string {
-	setNames := make([]string, 0, len(ipset.Sets))
-	for setName := range ipset.Sets {
+	setNames := make([]string, 0, len(ipset.sets))
+	for setName := range ipset.sets {
 		// we need setNames in some consistent order so that we can unit-test this method has a predictable output:
 		setNames = append(setNames, setName)
 	}
@@ -417,7 +430,7 @@ func buildIPSetRestore(ipset *IPSet) string {
 	tmpSets := map[string]string{}
 	ipSetRestore := &strings.Builder{}
 	for _, setName := range setNames {
-		set := ipset.Sets[setName]
+		set := ipset.sets[setName]
 		setOptions := strings.Join(set.Options, " ")
 
 		tmpSetName := tmpSets[setOptions]
@@ -470,7 +483,7 @@ func (ipset *IPSet) Save() error {
 	if err != nil {
 		return err
 	}
-	ipset.Sets = parseIPSetSave(ipset, stdout)
+	ipset.sets = parseIPSetSave(ipset, stdout)
 	return nil
 }
 
@@ -509,12 +522,16 @@ func (ipset *IPSet) Flush() error {
 
 // Get Set by Name.
 func (ipset *IPSet) Get(setName string) *Set {
-	set, ok := ipset.Sets[setName]
+	set, ok := ipset.sets[setName]
 	if !ok {
 		return nil
 	}
 
 	return set
+}
+
+func (ipset *IPSet) Sets() map[string]*Set {
+	return ipset.sets
 }
 
 // Rename a set. Set identified by SETNAME-TO must not exist.

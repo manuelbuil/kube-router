@@ -5,9 +5,41 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/coreos/go-iptables/iptables"
+	v1core "k8s.io/api/core/v1"
 )
 
 var hasWait bool
+
+// Interface based on the IPTables struct from github.com/coreos/go-iptables
+// which allows to mock it.
+type IPTablesHandler interface {
+	Proto() iptables.Protocol
+	Exists(table, chain string, rulespec ...string) (bool, error)
+	Insert(table, chain string, pos int, rulespec ...string) error
+	Append(table, chain string, rulespec ...string) error
+	AppendUnique(table, chain string, rulespec ...string) error
+	Delete(table, chain string, rulespec ...string) error
+	DeleteIfExists(table, chain string, rulespec ...string) error
+	List(table, chain string) ([]string, error)
+	ListWithCounters(table, chain string) ([]string, error)
+	ListChains(table string) ([]string, error)
+	ChainExists(table, chain string) (bool, error)
+	Stats(table, chain string) ([][]string, error)
+	ParseStat(stat []string) (iptables.Stat, error)
+	StructuredStats(table, chain string) ([]iptables.Stat, error)
+	NewChain(table, chain string) error
+	ClearChain(table, chain string) error
+	RenameChain(table, oldChain, newChain string) error
+	DeleteChain(table, chain string) error
+	ClearAndDeleteChain(table, chain string) error
+	ClearAll() error
+	DeleteAll() error
+	ChangePolicy(table, chain, target string) error
+	HasRandomFully() bool
+	GetIptablesVersion() (int, int, int)
+}
 
 func init() {
 	path, err := exec.LookPath("iptables-restore")
@@ -71,33 +103,98 @@ func Restore(table string, data []byte) error {
 	return nil
 }
 
-// AppendUnique ensures that rule is in chain only once in the buffer and that the occurrence is at the end of the buffer
-func AppendUnique(buffer bytes.Buffer, chain string, rule []string) bytes.Buffer {
-	var desiredBuffer bytes.Buffer
-
+// AppendUnique ensures that rule is in chain only once in the buffer and that the occurrence is at the end of the
+// buffer
+func AppendUnique(buffer *bytes.Buffer, chain string, rule []string) {
 	// First we need to remove any previous instances of the rule that exist, so that we can be sure that our version
 	// is unique and appended to the very end of the buffer
 	rules := strings.Split(buffer.String(), "\n")
 	if len(rules) > 0 && rules[len(rules)-1] == "" {
 		rules = rules[:len(rules)-1]
 	}
+	buffer.Reset()
+
 	for _, foundRule := range rules {
 		if strings.Contains(foundRule, chain) {
 			if strings.Contains(foundRule, strings.Join(rule, " ")) {
 				continue
 			}
 		}
-		desiredBuffer.WriteString(foundRule + "\n")
+		buffer.WriteString(foundRule + "\n")
 	}
 
 	// Now append the rule that we wanted to be unique
-	desiredBuffer = Append(desiredBuffer, chain, rule)
-	return desiredBuffer
+	Append(buffer, chain, rule)
 }
 
 // Append appends rule to chain at the end of buffer
-func Append(buffer bytes.Buffer, chain string, rule []string) bytes.Buffer {
+func Append(buffer *bytes.Buffer, chain string, rule []string) {
 	ruleStr := strings.Join(append(append([]string{"-A", chain}, rule...), "\n"), " ")
 	buffer.WriteString(ruleStr)
-	return buffer
+}
+
+type IPTablesSaveRestore struct {
+	saveCmd    string
+	restoreCmd string
+}
+
+func NewIPTablesSaveRestore(ipFamily v1core.IPFamily) *IPTablesSaveRestore {
+	switch ipFamily {
+	case v1core.IPv6Protocol:
+		return &IPTablesSaveRestore{
+			saveCmd:    "ip6tables-save",
+			restoreCmd: "ip6tables-restore",
+		}
+	case v1core.IPv4Protocol:
+		fallthrough
+	default:
+		return &IPTablesSaveRestore{
+			saveCmd:    "iptables-save",
+			restoreCmd: "iptables-restore",
+		}
+	}
+}
+
+func (iptsr *IPTablesSaveRestore) SaveInto(table string, buffer *bytes.Buffer) error {
+	path, err := exec.LookPath(iptsr.saveCmd)
+	if err != nil {
+		return err
+	}
+	stderrBuffer := bytes.NewBuffer(nil)
+	args := []string{iptsr.saveCmd, "-t", table}
+	cmd := exec.Cmd{
+		Path:   path,
+		Args:   args,
+		Stdout: buffer,
+		Stderr: stderrBuffer,
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%v (%s)", err, stderrBuffer)
+	}
+
+	return nil
+}
+
+func (iptsr *IPTablesSaveRestore) Restore(table string, data []byte) error {
+	path, err := exec.LookPath(iptsr.restoreCmd)
+	if err != nil {
+		return err
+	}
+	var args []string
+	if hasWait {
+		args = []string{iptsr.restoreCmd, "--wait", "-T", table}
+	} else {
+		args = []string{iptsr.restoreCmd, "-T", table}
+	}
+	cmd := exec.Cmd{
+		Path:  path,
+		Args:  args,
+		Stdin: bytes.NewBuffer(data),
+	}
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v (%s)", err, b)
+	}
+
+	return nil
 }
