@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	v1core "k8s.io/api/core/v1"
 )
 
 var hasWait bool
@@ -100,4 +102,71 @@ func Append(buffer bytes.Buffer, chain string, rule []string) bytes.Buffer {
 	ruleStr := strings.Join(append(append([]string{"-A", chain}, rule...), "\n"), " ")
 	buffer.WriteString(ruleStr)
 	return buffer
+}
+
+type IPTablesSaveRestore struct {
+	saveCmd    string
+	restoreCmd string
+}
+
+func NewIPTablesSaveRestore(ipFamily v1core.IPFamily) *IPTablesSaveRestore {
+	switch ipFamily {
+	case v1core.IPv6Protocol:
+		return &IPTablesSaveRestore{
+			saveCmd:    "ip6tables-save",
+			restoreCmd: "ip6tables-restore",
+		}
+	case v1core.IPv4Protocol:
+		fallthrough
+	default:
+		return &IPTablesSaveRestore{
+			saveCmd:    "iptables-save",
+			restoreCmd: "iptables-restore",
+		}
+	}
+}
+
+func (iptsr *IPTablesSaveRestore) SaveInto(table string, buffer *bytes.Buffer) error {
+	path, err := exec.LookPath(iptsr.saveCmd)
+	if err != nil {
+		return err
+	}
+	stderrBuffer := bytes.NewBuffer(nil)
+	args := []string{iptsr.saveCmd, "-t", table}
+	cmd := exec.Cmd{
+		Path:   path,
+		Args:   args,
+		Stdout: buffer,
+		Stderr: stderrBuffer,
+	}
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v (%s)", err, b)
+	}
+
+	return nil
+}
+
+func (iptsr *IPTablesSaveRestore) Restore(table string, data []byte) error {
+	path, err := exec.LookPath(iptsr.restoreCmd)
+	if err != nil {
+		return err
+	}
+	var args []string
+	if hasWait {
+		args = []string{iptsr.restoreCmd, "--wait", "-T", table}
+	} else {
+		args = []string{iptsr.restoreCmd, "-T", table}
+	}
+	cmd := exec.Cmd{
+		Path:  path,
+		Args:  args,
+		Stdin: bytes.NewBuffer(data),
+	}
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v (%s)", err, b)
+	}
+
+	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -138,14 +139,14 @@ func tNewPodNamespaceMapFromTC(target map[string]string) tPodNamespaceMap {
 func tCreateFakePods(t *testing.T, podInformer cache.SharedIndexInformer, nsInformer cache.SharedIndexInformer) tPodNamespaceMap {
 	podNamespaceMap := make(tPodNamespaceMap)
 	pods := []podInfo{
-		{name: "Aa", labels: labels.Set{"app": "a"}, namespace: "nsA", ip: "1.1"},
-		{name: "Aaa", labels: labels.Set{"app": "a", "component": "a"}, namespace: "nsA", ip: "1.2"},
-		{name: "Aab", labels: labels.Set{"app": "a", "component": "b"}, namespace: "nsA", ip: "1.3"},
-		{name: "Aac", labels: labels.Set{"app": "a", "component": "c"}, namespace: "nsA", ip: "1.4"},
-		{name: "Ba", labels: labels.Set{"app": "a"}, namespace: "nsB", ip: "2.1"},
-		{name: "Baa", labels: labels.Set{"app": "a", "component": "a"}, namespace: "nsB", ip: "2.2"},
-		{name: "Bab", labels: labels.Set{"app": "a", "component": "b"}, namespace: "nsB", ip: "2.3"},
-		{name: "Ca", labels: labels.Set{"app": "a"}, namespace: "nsC", ip: "3.1"},
+		{name: "Aa", labels: labels.Set{"app": "a"}, namespace: "nsA", ips: []v1.PodIP{{IP: "1.1.1.1"}}},
+		{name: "Aaa", labels: labels.Set{"app": "a", "component": "a"}, namespace: "nsA", ips: []v1.PodIP{{IP: "1.2.3.4"}}},
+		{name: "Aab", labels: labels.Set{"app": "a", "component": "b"}, namespace: "nsA", ips: []v1.PodIP{{IP: "1.3.2.2"}}},
+		{name: "Aac", labels: labels.Set{"app": "a", "component": "c"}, namespace: "nsA", ips: []v1.PodIP{{IP: "1.4.2.2"}}},
+		{name: "Ba", labels: labels.Set{"app": "a"}, namespace: "nsB", ips: []v1.PodIP{{IP: "2.1.1.1"}}},
+		{name: "Baa", labels: labels.Set{"app": "a", "component": "a"}, namespace: "nsB", ips: []v1.PodIP{{IP: "2.2.2.2"}}},
+		{name: "Bab", labels: labels.Set{"app": "a", "component": "b"}, namespace: "nsB", ips: []v1.PodIP{{IP: "2.3.2.2"}}},
+		{name: "Ca", labels: labels.Set{"app": "a"}, namespace: "nsC", ips: []v1.PodIP{{IP: "3.1"}}},
 	}
 	namespaces := []tNamespaceMeta{
 		{name: "nsA", labels: labels.Set{"name": "a", "team": "a"}},
@@ -156,7 +157,8 @@ func tCreateFakePods(t *testing.T, podInformer cache.SharedIndexInformer, nsInfo
 	ipsUsed := make(map[string]bool)
 	for _, pod := range pods {
 		podNamespaceMap.addPod(pod)
-		ipaddr := "1.1." + pod.ip
+		// TODO: test multiple IPs
+		ipaddr := pod.ips[0].IP
 		if ipsUsed[ipaddr] {
 			t.Fatalf("there is another pod with the same Ip address %s as this pod %s namespace %s",
 				ipaddr, pod.name, pod.name)
@@ -186,6 +188,13 @@ func newFakeNode(name string, addr string) *v1.Node {
 	}
 }
 
+func newFakeIPFamilyHandler(family v1.IPFamily, nodeIP net.IP) *ipFamilyHandler {
+	return &ipFamilyHandler{
+		family: family,
+		nodeIP: nodeIP,
+	}
+}
+
 // newUneventfulNetworkPolicyController returns new NetworkPolicyController object without any event handler
 func newUneventfulNetworkPolicyController(podInformer cache.SharedIndexInformer,
 	npInformer cache.SharedIndexInformer, nsInformer cache.SharedIndexInformer) (*NetworkPolicyController, error) {
@@ -193,8 +202,16 @@ func newUneventfulNetworkPolicyController(podInformer cache.SharedIndexInformer,
 	npc := NetworkPolicyController{}
 	npc.syncPeriod = time.Hour
 
+	// TODO: Handle both IP families
+	npc.ipFamilyHandlers = make(map[uint16]*ipFamilyHandler)
+	ipv4Handler := newFakeIPFamilyHandler(v1.IPv4Protocol, net.IPv4(10, 10, 10, 10))
+	// if err != nil {
+	// 	return nil, fmt.Errorf("could not create IP handler: %w", err)
+	// }
+	npc.ipFamilyHandlers[syscall.AF_INET] = ipv4Handler
+
 	npc.nodeHostName = "node"
-	npc.nodeIP = net.IPv4(10, 10, 10, 10)
+	// npc.nodeIPv4 = net.IPv4(10, 10, 10, 10)
 	npc.podLister = podInformer.GetIndexer()
 	npc.nsLister = nsInformer.GetIndexer()
 	npc.npLister = npInformer.GetIndexer()
@@ -376,7 +393,10 @@ func TestNewNetworkPolicySelectors(t *testing.T) {
 	defer cancel()
 	informerFactory.Start(ctx.Done())
 	cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced)
-	krNetPol, _ := newUneventfulNetworkPolicyController(podInformer, netpolInformer, nsInformer)
+	krNetPol, err := newUneventfulNetworkPolicyController(podInformer, netpolInformer, nsInformer)
+	if err != nil {
+		t.Errorf("Problems building network policy controller: %s", err)
+	}
 	tCreateFakePods(t, podInformer, nsInformer)
 	for _, test := range testCases {
 		test.netpol.createFakeNetpol(t, netpolInformer)
@@ -532,7 +552,10 @@ func TestNetworkPolicyBuilder(t *testing.T) {
 	defer cancel()
 	informerFactory.Start(ctx.Done())
 	cache.WaitForCacheSync(ctx.Done(), podInformer.HasSynced)
-	krNetPol, _ := newUneventfulNetworkPolicyController(podInformer, netpolInformer, nsInformer)
+	krNetPol, err := newUneventfulNetworkPolicyController(podInformer, netpolInformer, nsInformer)
+	if err != nil {
+		t.Errorf("Problems building network policy controller: %s", err)
+	}
 	tCreateFakePods(t, podInformer, nsInformer)
 	for _, test := range testCases {
 		test.netpol.createFakeNetpol(t, netpolInformer)
@@ -540,38 +563,39 @@ func TestNetworkPolicyBuilder(t *testing.T) {
 		if err != nil {
 			t.Errorf("Problems building policies: %s", err)
 		}
-		for _, np := range netpols {
-			fmt.Printf(np.policyType)
-			if np.policyType == "egress" || np.policyType == "both" {
-				err = krNetPol.processEgressRules(np, "", nil, "1")
-				if err != nil {
-					t.Errorf("Error syncing the rules: %s", err)
+		for _, ipFamilyHandler := range krNetPol.ipFamilyHandlers {
+			for _, np := range netpols {
+				fmt.Printf(np.policyType)
+				if np.policyType == "egress" || np.policyType == "both" {
+					err = krNetPol.processEgressRules(np, "", nil, "1", ipFamilyHandler)
+					if err != nil {
+						t.Errorf("Error syncing the rules: %s", err)
+					}
+				}
+				if np.policyType == "ingress" || np.policyType == "both" {
+					err = krNetPol.processIngressRules(np, "", nil, "1", ipFamilyHandler)
+					if err != nil {
+						t.Errorf("Error syncing the rules: %s", err)
+					}
 				}
 			}
-			if np.policyType == "ingress" || np.policyType == "both" {
-				err = krNetPol.processIngressRules(np, "", nil, "1")
-				if err != nil {
-					t.Errorf("Error syncing the rules: %s", err)
-				}
-			}
-		}
 
-		if !bytes.Equal([]byte(test.expectedRule), krNetPol.filterTableRules.Bytes()) {
-			t.Errorf("Invalid rule %s created:\nExpected:\n%s \nGot:\n%s", test.name, test.expectedRule, krNetPol.filterTableRules.String())
-		}
-		key := fmt.Sprintf("%s/%s", test.netpol.namespace, test.netpol.name)
-		obj, exists, err := krNetPol.npLister.GetByKey(key)
-		if err != nil {
-			t.Errorf("Failed to get Netpol from store: %s", err)
-		}
-		if exists {
-			err = krNetPol.npLister.Delete(obj)
+			if !bytes.Equal([]byte(test.expectedRule), ipFamilyHandler.filterTableRules.Bytes()) {
+				t.Errorf("Invalid rule %s created:\nExpected:\n%s \nGot:\n%s", test.name, test.expectedRule, ipFamilyHandler.filterTableRules.String())
+			}
+			key := fmt.Sprintf("%s/%s", test.netpol.namespace, test.netpol.name)
+			obj, exists, err := krNetPol.npLister.GetByKey(key)
 			if err != nil {
-				t.Errorf("Failed to remove Netpol from store: %s", err)
+				t.Errorf("Failed to get Netpol from store: %s", err)
 			}
+			if exists {
+				err = krNetPol.npLister.Delete(obj)
+				if err != nil {
+					t.Errorf("Failed to remove Netpol from store: %s", err)
+				}
+			}
+			ipFamilyHandler.filterTableRules.Reset()
 		}
-		krNetPol.filterTableRules.Reset()
-
 	}
 
 }
@@ -609,6 +633,18 @@ func TestNetworkPolicyController(t *testing.T) {
 			"failed to get parse --service-cluster-ip-range parameter: invalid CIDR address: 10.10.10.10",
 		},
 		{
+			"Test bad cluster CIDRs (using more than 2 ip addresses, including 2 ipv4)",
+			newMinimalKubeRouterConfig("10.96.0.0/12,10.244.0.0/16,2001:db8:42:1::/112", "", "node", nil),
+			true,
+			"too many CIDRs provided in --service-cluster-ip-range parameter, only two addresses are allowed at once for dual-stack",
+		},
+		{
+			"Test bad cluster CIDRs (using more than 2 ip addresses, including 2 ipv6)",
+			newMinimalKubeRouterConfig("10.96.0.0/12,2001:db8:42:0::/56,2001:db8:42:1::/112", "", "node", nil),
+			true,
+			"too many CIDRs provided in --service-cluster-ip-range parameter, only two addresses are allowed at once for dual-stack",
+		},
+		{
 			"Test good cluster CIDR (using single IP with a /32)",
 			newMinimalKubeRouterConfig("10.10.10.10/32", "", "node", nil),
 			false,
@@ -617,6 +653,18 @@ func TestNetworkPolicyController(t *testing.T) {
 		{
 			"Test good cluster CIDR (using normal range with /24)",
 			newMinimalKubeRouterConfig("10.10.10.0/24", "", "node", nil),
+			false,
+			"",
+		},
+		{
+			"Test good cluster CIDR (using ipv6)",
+			newMinimalKubeRouterConfig("2001:db8:42:1::/112", "", "node", nil),
+			false,
+			"",
+		},
+		{
+			"Test good cluster CIDRs (with dual-stack)",
+			newMinimalKubeRouterConfig("10.96.0.0/12,2001:db8:42:1::/112", "", "node", nil),
 			false,
 			"",
 		},
