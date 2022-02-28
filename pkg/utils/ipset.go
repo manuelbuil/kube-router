@@ -130,6 +130,7 @@ func getIPSetPath() (*string, error) {
 
 // Used to run ipset binary with args and return stdout.
 func (ipset *IPSet) run(args ...string) (string, error) {
+	fmt.Println("MANU - Inside ipset.run")
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
 	cmd := exec.Cmd{
@@ -148,6 +149,7 @@ func (ipset *IPSet) run(args ...string) (string, error) {
 
 // Used to run ipset binary with arg and inject stdin buffer and return stdout.
 func (ipset *IPSet) runWithStdin(stdin *bytes.Buffer, args ...string) (string, error) {
+	fmt.Printf("MANU - Inside ipset.runWithStdin with args: %v and stdin: %v\n", args, stdin.String())
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
 	cmd := exec.Cmd{
@@ -167,6 +169,7 @@ func (ipset *IPSet) runWithStdin(stdin *bytes.Buffer, args ...string) (string, e
 
 // NewIPSet create a new IPSet with ipSetPath initialized.
 func NewIPSet(isIpv6 bool) (*IPSet, error) {
+	fmt.Println("MANU - Inside ipset.NewIPSet")
 	ipSetPath, err := getIPSetPath()
 	if err != nil {
 		return nil, err
@@ -183,6 +186,7 @@ func NewIPSet(isIpv6 bool) (*IPSet, error) {
 // require type specific options. Does not create set on the system if it
 // already exists by the same name.
 func (ipset *IPSet) Create(setName string, createOptions ...string) (*Set, error) {
+	fmt.Printf("MANU - Inside ipset.Create. This is the name %v, these are the options: %v and this is ipset.isIpv6: %v\n", setName, createOptions, ipset.isIpv6)
 	// Populate Set map if needed
 	if ipset.Get(setName) == nil {
 		ipset.sets[setName] = &Set{
@@ -222,6 +226,7 @@ func (ipset *IPSet) Create(setName string, createOptions ...string) (*Set, error
 
 // Add a given Set to an IPSet
 func (ipset *IPSet) Add(set *Set) error {
+	fmt.Println("MANU - Inside ipset.Add")
 	_, err := ipset.Create(set.Name, set.Options...)
 	if err != nil {
 		return err
@@ -242,7 +247,9 @@ func (ipset *IPSet) Add(set *Set) error {
 
 // RefreshSet add/update internal Sets with a Set of entries but does not run restore command
 func (ipset *IPSet) RefreshSet(setName string, entriesWithOptions [][]string, setType string) {
+	fmt.Printf("MANU - Inside ipset.RefreshSet. This is the setName: %v and these are the entries: %v\n", setName, entriesWithOptions)
 	if ipset.Get(setName) == nil {
+		fmt.Printf("MANU - ipset.Get == nil, ipset does not exist\n")
 		ipset.sets[setName] = &Set{
 			Name:    setName,
 			Options: []string{setType, OptionTimeout, "0"},
@@ -253,6 +260,7 @@ func (ipset *IPSet) RefreshSet(setName string, entriesWithOptions [][]string, se
 	for i, entry := range entriesWithOptions {
 		entries[i] = &Entry{Set: ipset.sets[setName], Options: entry}
 	}
+	fmt.Printf("MANU - Finishing RefreshSet These are the entries: %v\n", entries)
 	ipset.Get(setName).Entries = entries
 }
 
@@ -261,6 +269,7 @@ func (ipset *IPSet) RefreshSet(setName string, entriesWithOptions [][]string, se
 // Note: if you need to add multiple entries (e.g., in a loop), use BatchAdd instead,
 // as it’s much more performant.
 func (set *Set) Add(addOptions ...string) (*Entry, error) {
+	fmt.Println("MANU - Inside ipset.Add")
 	entry := &Entry{
 		Set:     set,
 		Options: addOptions,
@@ -276,6 +285,7 @@ func (set *Set) Add(addOptions ...string) (*Entry, error) {
 // BatchAdd given entries (with their options) to the set.
 // For multiple items, this is much faster than Add().
 func (set *Set) BatchAdd(addOptions [][]string) error {
+	fmt.Println("MANU - Inside ipset.BatchAdd")
 	newEntries := make([]*Entry, len(addOptions))
 	for index, options := range addOptions {
 		entry := &Entry{
@@ -391,6 +401,7 @@ func (set *Set) name() string {
 // create KUBE-DST-3YNVZWWGX3UQQ4VQ hash:ip family inet hashsize 1024 maxelem 65536 timeout 0
 // add KUBE-DST-3YNVZWWGX3UQQ4VQ 100.96.1.6 timeout 0
 func parseIPSetSave(ipset *IPSet, result string) map[string]*Set {
+	fmt.Println("MANU - Inside ipset.parseIPSetSave")
 	sets := make(map[string]*Set)
 	// Save is always in order
 	lines := strings.Split(result, "\n")
@@ -432,6 +443,7 @@ func buildIPSetRestore(ipset *IPSet) string {
 	for _, setName := range setNames {
 		set := ipset.sets[setName]
 		setOptions := strings.Join(set.Options, " ")
+		fmt.Printf("MANU - Inside ipset.buildIPSetRestore. This is the setname: %v and this is the setOptions: %v\n", setName, setOptions)
 
 		tmpSetName := tmpSets[setOptions]
 		if tmpSetName == "" {
@@ -471,6 +483,7 @@ func buildIPSetRestore(ipset *IPSet) string {
 		ipSetRestore.WriteString(fmt.Sprintf("destroy %s\n", tmpSetName))
 	}
 
+	fmt.Printf("MANU - Inside ipset.buildIPSetRestore. About to exit. This is ipSetRestore.String(): %v\n", ipSetRestore.String())
 	return ipSetRestore.String()
 }
 
@@ -494,9 +507,11 @@ func (ipset *IPSet) Save() error {
 // mode except list, help, version, interactive mode and restore itself.
 // Send formatted ipset.sets into stdin of "ipset restore" command.
 func (ipset *IPSet) Restore() error {
+	fmt.Println("MANU - Inside ipset.Restore()")
 	stdin := bytes.NewBufferString(buildIPSetRestore(ipset))
 	_, err := ipset.runWithStdin(stdin, "restore", "-exist")
 	if err != nil {
+		fmt.Printf("MANU - There is an error in Restore() with this stdin: %v", stdin.String())
 		return err
 	}
 	return nil

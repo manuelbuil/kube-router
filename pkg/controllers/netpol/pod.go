@@ -163,7 +163,7 @@ func (npc *NetworkPolicyController) setupPodNetpolRules(pod *podInfo, podFwChain
 				continue
 			}
 			comment := "\"run through nw policy " + policy.name + "\""
-			policyChainName := networkPolicyChainName(policy.namespace, policy.name, version)
+			policyChainName := networkPolicyChainName(policy.namespace, policy.name, version, ipFamily)
 			var args []string
 			switch policy.policyType {
 			case "both":

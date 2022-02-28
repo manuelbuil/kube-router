@@ -19,6 +19,7 @@ import (
 	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	utilsnet "k8s.io/utils/net"
 )
 
 func (npc *NetworkPolicyController) newNetworkPolicyEventHandler() cache.ResourceEventHandler {
@@ -88,28 +89,52 @@ func (npc *NetworkPolicyController) syncNetworkPolicyChains(networkPoliciesInfo 
 	activePolicyIPSets := make(map[string]bool)
 
 	for ipFamily, ipset := range npc.ipSetHandlers {
+		klog.Infof("MANU - Inside the npc.ipSetHandlers loop. This is ipFamily: %v, this is ipset: %v and this is ipset.Sets()", ipFamily, ipset, ipset.Sets())
+		for name, set := range ipset.Sets() {
+			klog.Infof("MANU - Inside the npc.ipSetHandlers loop. This is name: %v, set.Name: %v, set.Entries: %v and set.Options: %v", name, set.Name, set.Entries, set.Options)
+		}
 		// run through all network policies
 		for _, policy := range networkPoliciesInfo {
+			klog.Infof("MANU - This is the policy: %v", policy)
+			klog.Infof("MANU - This is the policytargetPods: %v and this is the ipFamily: %v", policy.targetPods, ipFamily)
 
 			// ensure there is a unique chain per network policy in filter table
-			policyChainName := networkPolicyChainName(policy.namespace, policy.name, version)
+			policyChainName := networkPolicyChainName(policy.namespace, policy.name, version, ipFamily)
 			npc.filterTableRules[ipFamily].WriteString(":" + policyChainName + "\n")
 
 			activePolicyChains[policyChainName] = true
 
-			currnetPodIps := make([]string, 0, len(policy.targetPods))
-			for ip := range policy.targetPods {
-				currnetPodIps = append(currnetPodIps, ip)
+			var currentPodIps []api.PodIP
+			for _, pod := range policy.targetPods {
+				for _, ip := range pod.ips {
+					currentPodIps = append(currentPodIps, ip)
+				}
 			}
 
 			if policy.policyType == "both" || policy.policyType == "ingress" {
 				// create a ipset for all destination pod ip's matched by the policy spec PodSelector
-				targetDestPodIPSetName := policyDestinationPodIPSetName(policy.namespace, policy.name)
+				targetDestPodIPSetName := policyDestinationPodIPSetName(policy.namespace, policy.name, ipFamily)
 				setEntries := make([][]string, 0)
-				for _, podIP := range currnetPodIps {
-					setEntries = append(setEntries, []string{podIP, utils.OptionTimeout, "0"})
+				klog.Infof("MANU - ingress - These are podips: %v for the ipset: %v", currentPodIps, ipset)
+				for _, podIP := range currentPodIps {
+					if ipFamily == api.IPv4Protocol {
+						klog.Infof("MANU - api.IPv4Protocol. podIP: %v", podIP)
+						if utilsnet.IsIPv4String(podIP.IP) {
+							klog.Infof("MANU - It's an ipv4 address with ipv4 ipFamily. IP: %v", podIP)
+							setEntries = append(setEntries, []string{podIP.IP, utils.OptionTimeout, "0"})
+						}
+					}
+					if ipFamily == api.IPv6Protocol {
+						klog.Infof("MANU - api.IPv6Protocol. podIP: %v", podIP.IP)
+						if utilsnet.IsIPv6String(podIP.IP) {
+							klog.Infof("MANU - It's an ipv6 address with ipv6 ipFamily. IP: %v", podIP)
+							setEntries = append(setEntries, []string{podIP.IP, utils.OptionTimeout, "0", "family", "inet6"})
+						}
+					}
 				}
+				klog.Infof("MANU - ingess - These are the setEntries: %v and this is the targetDestPodIPSetName: %v", setEntries, targetDestPodIPSetName)
 				ipset.RefreshSet(targetDestPodIPSetName, setEntries, utils.TypeHashIP)
+				klog.Infof("MANU - ingress - After refresh, these are the setEntries: %v and this is the targetDestPodIPSetName: %v", setEntries, targetDestPodIPSetName)
 				if err := npc.processIngressRules(policy, targetDestPodIPSetName, activePolicyIPSets, version, ipFamily); err != nil {
 					return nil, nil, err
 				}
@@ -117,17 +142,24 @@ func (npc *NetworkPolicyController) syncNetworkPolicyChains(networkPoliciesInfo 
 			}
 			if policy.policyType == "both" || policy.policyType == "egress" {
 				// create a ipset for all source pod ip's matched by the policy spec PodSelector
-				targetSourcePodIPSetName := policySourcePodIPSetName(policy.namespace, policy.name)
+				targetSourcePodIPSetName := policySourcePodIPSetName(policy.namespace, policy.name, ipFamily)
 				setEntries := make([][]string, 0)
-				for _, podIP := range currnetPodIps {
-					setEntries = append(setEntries, []string{podIP, utils.OptionTimeout, "0"})
+				klog.Infof("MANU - egress - These are podips: %v for the ipset: %v", currentPodIps, ipset)
+				for _, podIP := range currentPodIps {
+					setEntries = append(setEntries, []string{podIP.IP, utils.OptionTimeout, "0"})
 				}
+				klog.Infof("MANU - egress - These are the setEntries: %v and this is the targetSourcePodIPSetName: %v", setEntries, targetSourcePodIPSetName)
 				ipset.RefreshSet(targetSourcePodIPSetName, setEntries, utils.TypeHashIP)
+				klog.Infof("MANU - egress - After refresh, these are the setEntries: %v and this is the targetSourcePodIPSetName: %v", setEntries, targetSourcePodIPSetName)
 				if err := npc.processEgressRules(policy, targetSourcePodIPSetName, activePolicyIPSets, version, ipFamily); err != nil {
 					return nil, nil, err
 				}
 				activePolicyIPSets[targetSourcePodIPSetName] = true
 			}
+		}
+		err := ipset.Restore()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to perform ipset restore on ipset: %s. %s", ipset, err.Error())
 		}
 	}
 
@@ -146,7 +178,7 @@ func (npc *NetworkPolicyController) processIngressRules(policy networkPolicyInfo
 		return nil
 	}
 
-	policyChainName := networkPolicyChainName(policy.namespace, policy.name, version)
+	policyChainName := networkPolicyChainName(policy.namespace, policy.name, version, ipFamily)
 
 	// run through all the ingress rules in the spec and create iptables rules
 	// in the chain for the network policy
@@ -157,9 +189,23 @@ func (npc *NetworkPolicyController) processIngressRules(policy networkPolicyInfo
 			activePolicyIPSets[srcPodIPSetName] = true
 			setEntries := make([][]string, 0)
 			ips := getIPsFromPods(ingressRule.srcPods, ipFamily)
-			for _, ip := range ips {
-				setEntries = append(setEntries, []string{ip, utils.OptionTimeout, "0"})
+			for _, podIP := range ips {
+				if ipFamily == api.IPv4Protocol {
+					klog.Infof("MANU - api.IPv4Protocol. podIP: %v", podIP)
+					if utilsnet.IsIPv4String(podIP.IP) {
+						klog.Infof("MANU - It's an ipv4 address with ipv4 ipFamily. IP: %v", podIP)
+						setEntries = append(setEntries, []string{podIP.IP, utils.OptionTimeout, "0"})
+					}
+				}
+				if ipFamily == api.IPv6Protocol {
+					klog.Infof("MANU - api.IPv6Protocol. podIP: %v", podIP.IP)
+					if utilsnet.IsIPv6String(podIP.IP) {
+						klog.Infof("MANU - It's an ipv6 address with ipv6 ipFamily. IP: %v", podIP)
+						setEntries = append(setEntries, []string{podIP.IP, utils.OptionTimeout, "0", "family", "inet6"})
+					}
+				}
 			}
+
 			npc.ipSetHandlers[ipFamily].RefreshSet(srcPodIPSetName, setEntries, utils.TypeHashIP)
 
 			if len(ingressRule.ports) != 0 {
@@ -298,7 +344,7 @@ func (npc *NetworkPolicyController) processEgressRules(policy networkPolicyInfo,
 		return nil
 	}
 
-	policyChainName := networkPolicyChainName(policy.namespace, policy.name, version)
+	policyChainName := networkPolicyChainName(policy.namespace, policy.name, version, ipFamily)
 
 	// run through all the egress rules in the spec and create iptables rules
 	// in the chain for the network policy
@@ -740,20 +786,20 @@ func (npc *NetworkPolicyController) grabNamedPortFromPod(pod *api.Pod, namedPort
 	}
 }
 
-func networkPolicyChainName(namespace, policyName string, version string) string {
-	hash := sha256.Sum256([]byte(namespace + policyName + version))
+func networkPolicyChainName(namespace, policyName string, version string, ipFamily api.IPFamily) string {
+	hash := sha256.Sum256([]byte(namespace + policyName + version + string(ipFamily)))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
 	return kubeNetworkPolicyChainPrefix + encoded[:16]
 }
 
-func policySourcePodIPSetName(namespace, policyName string) string {
-	hash := sha256.Sum256([]byte(namespace + policyName))
+func policySourcePodIPSetName(namespace, policyName string, ipFamily api.IPFamily) string {
+	hash := sha256.Sum256([]byte(namespace + policyName + string(ipFamily)))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
 	return kubeSourceIPSetPrefix + encoded[:16]
 }
 
-func policyDestinationPodIPSetName(namespace, policyName string) string {
-	hash := sha256.Sum256([]byte(namespace + policyName))
+func policyDestinationPodIPSetName(namespace, policyName string, ipFamily api.IPFamily) string {
+	hash := sha256.Sum256([]byte(namespace + policyName + string(ipFamily)))
 	encoded := base32.StdEncoding.EncodeToString(hash[:])
 	return kubeDestinationIPSetPrefix + encoded[:16]
 }
