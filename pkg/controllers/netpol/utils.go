@@ -79,9 +79,7 @@ func getIPsFromPods(pods []podInfo, family api.IPFamily) []string {
 }
 
 func getPodIPv6Address(pod podInfo) (string, error) {
-	fmt.Printf("MANU - Inside getPodIPv6Address. These are the pod.ips: %#v\n", pod.ips)
 	for _, ip := range pod.ips {
-		fmt.Printf("MANU - This is the IP: %#v\n", ip.IP)
 		if utilsnet.IsIPv6String(ip.IP) {
 			return ip.IP, nil
 		}

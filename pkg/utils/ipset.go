@@ -148,6 +148,7 @@ func (ipset *IPSet) run(args ...string) (string, error) {
 
 // Used to run ipset binary with arg and inject stdin buffer and return stdout.
 func (ipset *IPSet) runWithStdin(stdin *bytes.Buffer, args ...string) (string, error) {
+	fmt.Printf("MANU - Inside ipset.runWithStdin with args: %v and stdin: %v\n", args, stdin.String())
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
 	cmd := exec.Cmd{
@@ -501,6 +502,7 @@ func (ipset *IPSet) Restore() error {
 	stdin := bytes.NewBufferString(buildIPSetRestore(ipset))
 	_, err := ipset.runWithStdin(stdin, "restore", "-exist")
 	if err != nil {
+		fmt.Printf("MANU - There is an error in Restore() with this stdin: %v", stdin.String())
 		return err
 	}
 	return nil
